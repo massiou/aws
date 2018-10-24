@@ -12,8 +12,8 @@ import time
 
 import boto3
 
-ACCESS_KEY = 'XXX'
-SECRET_KEY = 'XXX'
+ACCESS_KEY = '0R0ZHO79MPY3UQAR51NW'
+SECRET_KEY = 'o6BWa=vLYGkuVrLuX0u3c4rGZS+ZmdO+uviCyCr3'
 
 
 def list_bucket(client, bucket):
@@ -68,7 +68,7 @@ def get_versions(client, bucket, timestamp):
     :rtype: list
     """
     versions = []
-
+    deleted = []
     # Create a paginator to browse all versions
     paginator = client.get_paginator('list_object_versions')
 
@@ -79,10 +79,28 @@ def get_versions(client, bucket, timestamp):
     # Loop on all pages
     for request in pages:
         c_versions = request.get('Versions', [])
+        c_deleted = request.get('DeleteMarkers', [])
+        print("DELETE MARKERS ", c_deleted)
         versions.extend(c_versions)
+        deleted.extend(c_deleted)
 
     # Only returns the one's created after `timestamp`
-    return [v for v in versions if date_to_ts(v['LastModified']) < timestamp]
+    return (
+        [v for v in versions if date_to_ts(v['LastModified']) < timestamp],
+        [d for d in deleted if date_to_ts(d['LastModified']) < timestamp]
+    )
+
+
+def get_deleted(client, bucket):
+    """
+    Retrieve deleted objects
+
+    :param client: s3 client object
+    :type client: boto3.client()
+    :param bucket: bucket name
+    :type bucket: string
+    :return:
+    """
 
 
 def copy_object(client, copy_source, bucket, object_name):
@@ -93,6 +111,7 @@ def copy_object(client, copy_source, bucket, object_name):
     :param object_name:
     :return:
     """
+    print("Copy %s from %s to %s" % (object_name, copy_source['Bucket'], bucket))
     return client.copy_object(
         CopySource=copy_source, Bucket=bucket, Key=object_name
     )
@@ -115,7 +134,7 @@ def copy_objects(client, bucket_src, bucket_dest, timestamp):
     """
     objects_to_copy = []
 
-    all_versions = get_versions(client, bucket_src, timestamp)
+    all_versions, all_deleted = get_versions(client, bucket_src, timestamp)
 
     # Unique objects name
     objects = set([obj['Key'] for obj in all_versions])
@@ -127,16 +146,34 @@ def copy_objects(client, bucket_src, bucket_dest, timestamp):
             for obj in all_versions if obj['Key'] == object_name
         ]
 
+        # Build all the deleted markers for `object_name`
+        deleted = [
+            (object_name, obj.get('VersionId', 0), obj.get('LastModified'))
+            for obj in all_deleted if obj['Key'] == object_name
+        ]
+
         # Get only the more recent version
-        version_to_copy = max(versions, key=lambda x: x[2])
+        version_more_recent = max(versions, key=lambda x: x[2])
+
+        if deleted:
+            delete_more_recent = max(deleted, key=lambda x: x[2])
+            if delete_more_recent[2] > version_more_recent[2]:
+                #print("DO NOT COPY ", object_name)
+                continue
 
         copy_source = {
             'Bucket': bucket_src,
             'Key': object_name,
-            'VersionId': str(version_to_copy[1])
+            'VersionId': str(version_more_recent[1])
         }
 
         objects_to_copy.append((copy_source, object_name))
+
+    # Create bucket
+    try:
+        client.create_bucket(Bucket=bucket_dest)
+    except Exception as exc:
+        print(exc)
 
     # Multithread the copies
     threads = []
@@ -206,9 +243,7 @@ def main():
         aws_secret_access_key=SECRET_KEY,
         endpoint_url=args.endpoint,
     )
-
     ret = copy_objects(client, args.bucket_source, args.bucket_dest, args.timestamp)
-    print(ret)
 
 
 if __name__ == '__main__':
