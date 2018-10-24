@@ -80,7 +80,6 @@ def get_versions(client, bucket, timestamp):
     for request in pages:
         c_versions = request.get('Versions', [])
         c_deleted = request.get('DeleteMarkers', [])
-        print("DELETE MARKERS ", c_deleted)
         versions.extend(c_versions)
         deleted.extend(c_deleted)
 
@@ -89,18 +88,6 @@ def get_versions(client, bucket, timestamp):
         [v for v in versions if date_to_ts(v['LastModified']) < timestamp],
         [d for d in deleted if date_to_ts(d['LastModified']) < timestamp]
     )
-
-
-def get_deleted(client, bucket):
-    """
-    Retrieve deleted objects
-
-    :param client: s3 client object
-    :type client: boto3.client()
-    :param bucket: bucket name
-    :type bucket: string
-    :return:
-    """
 
 
 def copy_object(client, copy_source, bucket, object_name):
