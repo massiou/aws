@@ -7,13 +7,21 @@ Perform a S3 bucket snapshot
 
 from argparse import ArgumentParser, RawDescriptionHelpFormatter
 from datetime import timezone
+import logging
 import threading
 import time
 
 import boto3
+import botocore
+
 
 ACCESS_KEY = '0R0ZHO79MPY3UQAR51NW'
 SECRET_KEY = 'o6BWa=vLYGkuVrLuX0u3c4rGZS+ZmdO+uviCyCr3'
+
+# Create logger
+log = logging.getLogger(__name__)
+FORMAT = '%(asctime)-15s: [s3_snapshot] %(message)s'
+logging.basicConfig(level=logging.INFO, format=FORMAT)
 
 
 def list_bucket(client, bucket):
@@ -83,7 +91,7 @@ def get_versions(client, bucket, timestamp):
         versions.extend(c_versions)
         deleted.extend(c_deleted)
 
-    # Only returns the one's created after `timestamp`
+    # Only returns the one's created before `timestamp`
     return (
         [v for v in versions if date_to_ts(v['LastModified']) < timestamp],
         [d for d in deleted if date_to_ts(d['LastModified']) < timestamp]
@@ -92,15 +100,22 @@ def get_versions(client, bucket, timestamp):
 
 def copy_object(client, copy_source, bucket, object_name):
     """
+    Copy an already stored object in S3
 
-    :param copy_source:
-    :param bucket:
-    :param object_name:
-    :return:
+    :param copy_source: copy source structure
+    :type copy_source: dictionary
+    :param bucket: destination bucket name
+    :type bucket: string
+    :param object_name: copied object
+    :type object_name: string
+    :rtype: dictionary
     """
-    print("Copy %s from %s to %s" % (object_name, copy_source['Bucket'], bucket))
+    log.info(
+        "Copy %s from %s to %s", object_name, copy_source['Bucket'], bucket
+    )
     return client.copy_object(
-        CopySource=copy_source, Bucket=bucket, Key=object_name
+        CopySource=copy_source, Bucket=bucket, Key=object_name,
+        MetadataDirective='COPY', TaggingDirective='COPY'
     )
 
 
@@ -142,10 +157,11 @@ def copy_objects(client, bucket_src, bucket_dest, timestamp):
         # Get only the more recent version
         version_more_recent = max(versions, key=lambda x: x[2])
 
+        # Handle the case of a deleted object -> do not copy it
         if deleted:
             delete_more_recent = max(deleted, key=lambda x: x[2])
             if delete_more_recent[2] > version_more_recent[2]:
-                #print("DO NOT COPY ", object_name)
+                # Deletion is more recent -> do not copy
                 continue
 
         copy_source = {
@@ -156,10 +172,11 @@ def copy_objects(client, bucket_src, bucket_dest, timestamp):
 
         objects_to_copy.append((copy_source, object_name))
 
-    # Create bucket
+    # Create the destination bucket
     try:
         client.create_bucket(Bucket=bucket_dest)
     except Exception as exc:
+        # Ignore if it already exists
         print(exc)
 
     # Multithread the copies
@@ -181,7 +198,7 @@ def copy_objects(client, bucket_src, bucket_dest, timestamp):
         thr.join()
 
     duration = time.time() - start
-    print("Copy {0} objects in {1} s".format(len(objects_to_copy), duration))
+    log.info("Copy %s objects in %s s", len(objects_to_copy), duration)
     return objects_to_copy
 
 
@@ -213,6 +230,13 @@ def arg_parse():
         help='http endpoint',
         required=True)
 
+    parser.add_argument(
+        '-c', '--connections',
+        help='size of http connections pool',
+        type=int,
+        default=1000,
+        required=False)
+
     args = parser.parse_args()
 
     return parser, args
@@ -229,8 +253,12 @@ def main():
         aws_access_key_id=ACCESS_KEY,
         aws_secret_access_key=SECRET_KEY,
         endpoint_url=args.endpoint,
+        config=botocore.client.Config(max_pool_connections=args.connections)
     )
-    ret = copy_objects(client, args.bucket_source, args.bucket_dest, args.timestamp)
+
+    ret = copy_objects(
+        client, args.bucket_source, args.bucket_dest, args.timestamp
+    )
 
 
 if __name__ == '__main__':
